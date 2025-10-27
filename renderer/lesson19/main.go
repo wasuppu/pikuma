@@ -1,0 +1,382 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"math"
+	"os"
+	"path/filepath"
+	"runtime"
+
+	"github.com/veandco/go-sdl2/sdl"
+)
+
+const (
+	FPS               = 60
+	FRAME_TARGET_TIME = 1000 / FPS
+)
+
+var (
+	trianglesToRender []Triangle // Array of triangles that should be rendered frame by frame
+	cameraPosition    = Vec3{0, 0, 0}
+	projMatrix        Mat4
+	mesh              Mesh
+	cullMethod        CullMethod
+	renderMethod      RenderMethod
+	light             = Light{Vec3{0, 0, 1}}
+)
+
+var (
+	isRunning          bool
+	window             *sdl.Window
+	renderer           *sdl.Renderer
+	colorBufferTexture *sdl.Texture
+	colorBuffer        []uint32
+	windowWidth        int32  = 800
+	windowHeight       int32  = 600
+	previousFrameTime  uint64 = 0
+	TicksPassed               = func(a, b uint64) bool { return int32(b-a) <= 0 }
+	basepath           string
+	parentpath         string
+)
+
+func init() {
+	_, exepath, _, _ := runtime.Caller(0)
+	basepath = filepath.Dir(exepath)
+	parentpath = filepath.Dir(basepath)
+}
+
+type Light struct {
+	direction Vec3
+}
+
+func lightApplyIntensity(originalColor uint32, percentageFactor float64) uint32 {
+	if percentageFactor < 0 {
+		percentageFactor = 0
+	}
+	if percentageFactor > 1 {
+		percentageFactor = 1
+	}
+
+	a := originalColor & 0xFF000000
+	r := uint32(float64(originalColor&0x00FF0000) * percentageFactor)
+	g := uint32(float64(originalColor&0x0000FF00) * percentageFactor)
+	b := uint32(float64(originalColor&0x000000FF) * percentageFactor)
+
+	newColor := a | (r & 0x00FF0000) | (g & 0x0000FF00) | (b & 0x000000FF)
+	return newColor
+}
+
+// Initial SDL
+func initial() bool {
+	var err error
+	if err = sdl.Init(sdl.INIT_EVERYTHING); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize SDL: %s\n", err)
+		return false
+	}
+
+	// Use SDL to query what is the fullscreen max width and height
+	displayMode, _ := sdl.GetCurrentDisplayMode(0)
+	windowWidth = displayMode.W
+	windowHeight = displayMode.H
+
+	// Create a SDL window
+	window, err = sdl.CreateWindow("", sdl.WINDOWPOS_CENTERED, sdl.WINDOWPOS_CENTERED,
+		windowWidth, windowHeight, sdl.WINDOW_BORDERLESS)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create SDL window: %s\n", err)
+		return false
+	}
+
+	// Create a SDL renderer
+	renderer, err = sdl.CreateRenderer(window, -1, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create renderer: %s\n", err)
+		return false
+	}
+
+	// window.SetFullscreen(sdl.WINDOW_FULLSCREEN)
+
+	return true
+}
+
+// Setup function to initialize variables and game objects
+func setup() (err error) {
+	// Initialize render mode and triangle culling method
+	renderMethod = RENDER_FILL_TRIANGLE
+	cullMethod = CULL_BACKFACE
+
+	// Allocate the required memory in bytes to hold the color buffer
+	colorBuffer = make([]uint32, windowWidth*windowHeight)
+
+	// Creating a SDL texture that is used to display the color buffer
+	colorBufferTexture, err = renderer.CreateTexture(
+		sdl.PIXELFORMAT_ARGB8888,
+		sdl.TEXTUREACCESS_STREAMING,
+		windowWidth,
+		windowHeight)
+
+	if err != nil {
+		return fmt.Errorf("failed to creat texture: %s", err)
+	}
+
+	// Initialize the perspective projection matrix
+	fov := math.Pi / 3.0 // the same as 180/3, or 60deg
+	aspect := float64(windowHeight) / float64(windowWidth)
+	znear := 0.1
+	zfar := 100.0
+	projMatrix = Perspective(fov, aspect, znear, zfar)
+
+	// Loads the vertex and face values for the mesh data structure
+	// mesh = LoadCubeMeshData()
+	mesh, err = LoadObjFileData(filepath.Join(parentpath, "assets", "f22.obj"))
+	if err != nil {
+		return fmt.Errorf("failed to load model: %s", err)
+	}
+
+	return nil
+}
+
+// Poll system events and handle keyboard input
+func processInput() {
+	for event := sdl.PollEvent(); event != nil; event = sdl.PollEvent() {
+		switch t := event.(type) {
+		case *sdl.QuitEvent:
+			println("Quit")
+			isRunning = false
+		case *sdl.KeyboardEvent:
+			switch t.Type {
+			case sdl.KEYDOWN:
+				switch t.Keysym.Sym {
+				case sdl.K_ESCAPE:
+					isRunning = false
+				case sdl.K_1:
+					renderMethod = RENDER_WIRE_VERTEX
+				case sdl.K_2:
+					renderMethod = RENDER_WIRE
+				case sdl.K_3:
+					renderMethod = RENDER_FILL_TRIANGLE
+				case sdl.K_4:
+					renderMethod = RENDER_FILL_TRIANGLE_WIRE
+				case sdl.K_c:
+					cullMethod = CULL_BACKFACE
+				case sdl.K_d:
+					cullMethod = CULL_NONE
+				}
+			}
+		}
+	}
+}
+
+// Update function frame by frame with a fixed time step
+func update() {
+	// Wait some time until the reach the target frame time in milliseconds
+	timeToWait := FRAME_TARGET_TIME - (sdl.GetTicks64() - previousFrameTime)
+
+	// Only delay execution if we are running too fast
+	if timeToWait > 0 && timeToWait <= FRAME_TARGET_TIME {
+		sdl.Delay(uint32(timeToWait))
+	}
+
+	previousFrameTime = sdl.GetTicks64()
+
+	// Change the mesh scale, rotation and translation values per animation frame
+	mesh.rotation[0] += 0.01
+	// mesh.rotation = mesh.rotation.addn(0.01)
+	// mesh.scale[0] += 0.002
+	// mesh.scale[1] += 0.001
+	// mesh.translation[0] += 0.01
+	mesh.translation[2] = 5
+
+	// Create a scale, rotation and translation matrices that will be used to multiply the mesh vertices
+	scaleMatrix := Scale(mesh.scale)
+	translationMatrix := Translation(mesh.translation)
+	rotationMatrixX := RotateX(mesh.rotation.x())
+	rotationMatrixY := RotateY(mesh.rotation.y())
+	rotationMatrixZ := RotateZ(mesh.rotation.z())
+
+	// Create a World Matrix combining scale, rotation, and translation matrices
+	worldMatrix := Identity4()
+	// Order matters: First scale, then rotate, then translate. [T]*[R]*[S]*v
+	worldMatrix = scaleMatrix.mul(worldMatrix)
+	worldMatrix = rotationMatrixZ.mul(worldMatrix)
+	worldMatrix = rotationMatrixY.mul(worldMatrix)
+	worldMatrix = rotationMatrixX.mul(worldMatrix)
+	worldMatrix = translationMatrix.mul(worldMatrix)
+
+	// Loop all triangle faces of our mesh
+	for i := range len(mesh.faces) {
+		meshFace := mesh.faces[i]
+
+		var faceVertices [3]Vec3
+		faceVertices[0] = mesh.vertices[meshFace.a-1]
+		faceVertices[1] = mesh.vertices[meshFace.b-1]
+		faceVertices[2] = mesh.vertices[meshFace.c-1]
+
+		var transformedVertices [3]Vec4
+
+		// Loop all three vertices of this current face and apply transformations
+		for j := range 3 {
+			transformedVertex := faceVertices[j].v4()
+
+			// Multiply the world matrix by the original vector
+			transformedVertex = worldMatrix.mulv(transformedVertex)
+
+			// Save transformed vertex in the array of transformed vertices
+			transformedVertices[j] = transformedVertex
+		}
+
+		// Check backface culling
+		vectorA := transformedVertices[0].v3() /*   A   */
+		vectorB := transformedVertices[1].v3() /*  / \  */
+		vectorC := transformedVertices[2].v3() /* C---B */
+
+		// Get the vector subtraction of B-A and C-A
+		vectorAB := vectorB.sub(vectorA)
+		vectorAC := vectorC.sub(vectorA)
+		vectorAB = vectorAB.normalize()
+		vectorAC = vectorAC.normalize()
+
+		// Compute the face normal (using cross product to find perpendicular)
+		normal := vectorAB.cross(vectorAC)
+		normal = normal.normalize()
+
+		// Find the vector between a point in the triangle and the camera origin
+		cameraRay := cameraPosition.sub(vectorA)
+
+		// Calculate how aligned the camera ray is with the face normal (using dot product)
+		dotNormalCamera := normal.dot(cameraRay)
+
+		// Backface culling test to see if the current face should be projected
+		if cullMethod == CULL_BACKFACE {
+			// Bypass the triangles that are looking away from the camera
+			if dotNormalCamera < 0 {
+				continue
+			}
+		}
+
+		var projectedPoints [3]Vec4
+		// Loop all three vertices of this current face and apply transformations
+		for j := range 3 {
+			// Project the current vertex
+			projectedPoints[j] = projMatrix.mulv(transformedVertices[j]).PerspectiveDivide()
+
+			// Scale into the view
+			projectedPoints[j][0] *= float64(windowWidth) / 2
+			projectedPoints[j][1] *= float64(windowHeight) / 2
+
+			// Invert the y values to account for flipped screen y coordinate
+			projectedPoints[j][1] *= -1
+
+			// Translate the projected points to the middle of the screen
+			projectedPoints[j][0] += float64(windowWidth) / 2
+			projectedPoints[j][1] += float64(windowHeight) / 2
+		}
+		// Calculate the average depth for each face based on the vertices after transformation
+		avgDepth := (transformedVertices[0].z() + transformedVertices[1].z() + transformedVertices[2].z()) / 3.0
+
+		// Calculate the shade intensity based on how aliged is the face normal and the opposite of the light direction
+		lightIntensityFactor := -normal.dot(light.direction)
+
+		// Calculate the triangle color based on the light angle
+		triangleColor := lightApplyIntensity(meshFace.color, lightIntensityFactor)
+
+		// Create the final projected triangle that will be rendered in screen space
+		projectedTriangle := Triangle{
+			[3]Vec2{
+				{projectedPoints[0].x(), projectedPoints[0].y()},
+				{projectedPoints[1].x(), projectedPoints[1].y()},
+				{projectedPoints[2].x(), projectedPoints[2].y()},
+			},
+			triangleColor,
+			avgDepth,
+		}
+
+		// Save the projected triangle in the array of triangles to render
+		trianglesToRender = append(trianglesToRender, projectedTriangle)
+	}
+
+	// Sort the triangles to render by their avg_depth
+	numTriangles := len(trianglesToRender)
+	for i := range numTriangles {
+		for j := i; j < numTriangles; j++ {
+			if trianglesToRender[i].avgDepth < trianglesToRender[j].avgDepth {
+				// Swap the triangles positions in the array
+				swap(&trianglesToRender[i], &trianglesToRender[j])
+			}
+		}
+	}
+
+}
+
+// Render function to draw objects on the display
+func render() {
+	drawGrid()
+
+	// // Loop all projected triangles and render them
+	for i := range trianglesToRender {
+		triangle := trianglesToRender[i]
+
+		// Draw filled triangle
+		if renderMethod == RENDER_FILL_TRIANGLE || renderMethod == RENDER_FILL_TRIANGLE_WIRE {
+			drawFilledTriangle(
+				int32(triangle.points[0].x()), int32(triangle.points[0].y()), // vertex A
+				int32(triangle.points[1].x()), int32(triangle.points[1].y()), // vertex B
+				int32(triangle.points[2].x()), int32(triangle.points[2].y()), // vertex C
+				triangle.color,
+			)
+		}
+
+		// Draw triangle wireframe
+		if renderMethod == RENDER_WIRE || renderMethod == RENDER_WIRE_VERTEX || renderMethod == RENDER_FILL_TRIANGLE_WIRE {
+			drawTriangle(
+				int32(triangle.points[0].x()), int32(triangle.points[0].y()), // vertex A
+				int32(triangle.points[1].x()), int32(triangle.points[1].y()), // vertex B
+				int32(triangle.points[2].x()), int32(triangle.points[2].y()), // vertex C
+				0xFFFFFFFF,
+			)
+		}
+
+		// Draw triangle vertex points
+		if renderMethod == RENDER_WIRE_VERTEX {
+			drawRect(int32(triangle.points[0].x())-3, int32(triangle.points[0].y())-3, 6, 6, 0xFFFF0000) // vertex A
+			drawRect(int32(triangle.points[1].x())-3, int32(triangle.points[1].y())-3, 6, 6, 0xFFFF0000) // vertex B
+			drawRect(int32(triangle.points[2].x())-3, int32(triangle.points[2].y())-3, 6, 6, 0xFFFF0000) // vertex C
+		}
+	}
+
+	// Clear the array of triangles to render every frame loop
+	trianglesToRender = []Triangle{}
+
+	// Finally draw the color buffer to the SDL window
+	renderColorBuffer()
+
+	// Clear all the arrays to get ready for the next frame
+	clearColorBuffer(0xFF000000)
+
+	renderer.Present()
+}
+
+// Clean up SDL
+func destory() {
+	renderer.Destroy()
+	window.Destroy()
+	sdl.Quit()
+}
+
+// Main function
+func main() {
+	isRunning = initial()
+
+	if err := setup(); err != nil {
+		log.Fatalf("%#v", err)
+	}
+
+	for isRunning {
+		processInput()
+		update()
+		render()
+	}
+
+	defer destory()
+}
