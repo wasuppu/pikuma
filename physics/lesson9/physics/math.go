@@ -1,0 +1,41 @@
+package physics
+
+import (
+	"math"
+)
+
+type Vec2 struct {
+	X, Y float64
+}
+
+func (v Vec2) Add(o Vec2) Vec2 {
+	return Vec2{v.X + o.X, v.Y + o.Y}
+}
+
+func (v Vec2) Sub(o Vec2) Vec2 {
+	return Vec2{v.X - o.X, v.Y - o.Y}
+}
+
+func (v Vec2) Muln(t float64) Vec2 {
+	return Vec2{v.X * t, v.Y * t}
+}
+
+func (v Vec2) Divn(t float64) Vec2 {
+	return Vec2{v.X / t, v.Y / t}
+}
+
+func (v Vec2) Dot(o Vec2) float64 {
+	return v.X*o.X + v.Y*o.Y
+}
+
+func (v Vec2) Cross(o Vec2) float64 {
+	return v.X*o.Y - v.Y*o.X
+}
+
+func (v Vec2) Length() float64 {
+	return math.Sqrt(v.Dot(v))
+}
+
+func (v Vec2) Normalize() Vec2 {
+	return v.Divn(v.Length())
+}

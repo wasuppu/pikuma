@@ -1,0 +1,95 @@
+package physics
+
+const (
+	PIXELS_PER_METER = 50
+)
+
+type World struct {
+	G           float64
+	bodies      []*Body
+	constraints []Constraint
+	forces      []Vec2
+	torques     []float64
+}
+
+func NewWorld(gravity float64) *World {
+	world := World{}
+	world.G = -gravity
+	return &world
+}
+
+func (w *World) AddBody(body *Body) {
+	w.bodies = append(w.bodies, body)
+}
+
+func (w *World) GetBodies() []*Body {
+	return w.bodies
+}
+
+func (w *World) AddConstraint(constraint Constraint) {
+	w.constraints = append(w.constraints, constraint)
+}
+
+func (w *World) GetConstraints() []Constraint {
+	return w.constraints
+}
+
+func (w *World) AddForce(force Vec2) {
+	w.forces = append(w.forces, force)
+}
+
+func (w *World) Update(dt float64) {
+	// Loop all bodies of the world applying forces
+	for _, body := range w.bodies {
+		// Apply the weight force to all bodies
+		weight := Vec2{X: 0.0, Y: body.Mass * w.G * PIXELS_PER_METER}
+		body.AddFore(weight)
+
+		// Apply forces to all bodies
+		for _, force := range w.forces {
+			body.AddFore(force)
+		}
+
+		// Apply torque to all bodies
+		for _, torque := range w.torques {
+			body.AddTorque(torque)
+		}
+	}
+
+	// Integrate all the forces
+	for _, body := range w.bodies {
+		body.IntegrateForces(dt)
+	}
+
+	// Solve all constraints (naive iteration)
+	for range 50 {
+		for _, constraint := range w.constraints {
+			constraint.Solve()
+		}
+	}
+
+	// Integrate all the velocities
+	for _, body := range w.bodies {
+		body.IntegrateVelocities(dt)
+	}
+
+	// Collision detection and resolution for all bodies of the world
+	w.CheckCollisions()
+}
+
+func (w *World) CheckCollisions() {
+	// Check all the bodies with all other bodies detecting collisions
+	for i := range len(w.bodies) {
+		for j := i + 1; j < len(w.bodies); j++ {
+			a := w.bodies[i]
+			b := w.bodies[j]
+			a.IsColliding = false
+			b.IsColliding = false
+
+			if isColliding, contact := IsColliding(a, b); isColliding {
+				// Resolve the collision
+				contact.ResolveCollision()
+			}
+		}
+	}
+}

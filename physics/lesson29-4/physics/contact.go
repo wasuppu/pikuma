@@ -1,0 +1,18 @@
+package physics
+
+type Contact struct {
+	A      *Body
+	B      *Body
+	Start  Vec2
+	End    Vec2
+	Normal Vec2
+	Depth  float64
+}
+
+func (c *Contact) ResolvePenetration() {
+
+}
+
+func (c *Contact) ResolveCollision() {
+
+}
